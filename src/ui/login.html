@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="id" class="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Masuk — CrossUpload</title>
+  <link rel="stylesheet" href="/assets/app.css" />
+</head>
+<body>
+  <div class="login-shell">
+    <div class="card login-card">
+      <div style="text-align:center; margin-bottom:22px;">
+        <div class="brand-icon" style="width:46px; height:46px; border-radius:14px; margin:0 auto 12px;">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+            <polyline points="2 17 12 22 22 17"></polyline>
+            <polyline points="2 12 12 17 22 12"></polyline>
+          </svg>
+        </div>
+        <div style="font-size:18px; font-weight:800;">CrossUpload <span class="rust-pill">Rust</span></div>
+        <div class="mut" style="font-size:12px; margin-top:4px;">Masuk untuk mengelola publikasi lintas platform</div>
+      </div>
+
+      <form id="login-form" class="stack" style="gap:14px;">
+        <div>
+          <label class="field-label">Email</label>
+          <input class="input" name="email" type="email" placeholder="owner@local" required autofocus />
+        </div>
+        <div>
+          <label class="field-label">Password</label>
+          <input class="input" name="password" type="password" placeholder="••••••••••••" required />
+        </div>
+        <div id="login-err" class="alert alert-bad hidden"></div>
+        <button id="login-btn" class="btn btn-lg" type="submit" style="width:100%;">Masuk ke Studio</button>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const saved = localStorage.getItem("cp_theme");
+      document.documentElement.classList.toggle("dark", saved ? saved === "dark" : true);
+      const form = document.getElementById("login-form");
+      const errBox = document.getElementById("login-err");
+      const btn = document.getElementById("login-btn");
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        btn.disabled = true;
+        errBox.classList.add("hidden");
+        const fd = new FormData(form);
+        try {
+          const r = await fetch("/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: fd.get("email"), password: fd.get("password") }),
+          });
+          if (r.ok) {
+            location.href = "/";
+            return;
+          }
+          const j = await r.json().catch(() => ({}));
+          errBox.textContent = j.error || "Gagal masuk";
+          errBox.classList.remove("hidden");
+        } catch {
+          errBox.textContent = "Tidak dapat menghubungi server";
+          errBox.classList.remove("hidden");
+        }
+        btn.disabled = false;
+      });
+    })();
+  </script>
+</body>
+</html>
