@@ -7,6 +7,7 @@ use crate::security::AppConfig;
 use anyhow::{anyhow, bail, Result};
 use reqwest::{Body, Client, RequestBuilder};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -19,11 +20,23 @@ pub struct PublishInput {
     pub title: Option<String>,
     pub caption: Option<String>,
     pub hashtags: Vec<String>,
+    pub visibility: Option<String>,
+    pub custom_thumb_path: Option<PathBuf>,
+    pub custom_thumb_url: Option<String>,
 }
 
 pub struct PublishResult {
     pub platform_post_id: String,
     pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PostMetrics {
+    pub views: Option<i64>,
+    pub likes: Option<i64>,
+    pub comments: Option<i64>,
+    pub shares: Option<i64>,
+    pub note: Option<String>,
 }
 
 pub fn build_http_client() -> Result<Client> {
@@ -141,6 +154,21 @@ pub async fn publish(
         "tiktok" => tiktok::publish(client, cfg, tokens, input).await,
         "facebook" => meta::publish_facebook(client, tokens, external_id, input).await,
         "instagram" => meta::publish_instagram(client, tokens, external_id, input).await,
+        _ => bail!("Platform {platform} tidak dikenal"),
+    }
+}
+
+pub async fn fetch_metrics_batch(
+    client: &Client,
+    platform: &str,
+    tokens: &TokenSet,
+    post_ids: &[String],
+) -> Result<HashMap<String, PostMetrics>> {
+    match platform {
+        "youtube" => youtube::fetch_metrics_batch(client, tokens, post_ids).await,
+        "tiktok" => tiktok::fetch_metrics_batch(client, tokens, post_ids).await,
+        "facebook" => meta::fetch_facebook_metrics_batch(client, tokens, post_ids).await,
+        "instagram" => meta::fetch_instagram_metrics_batch(client, tokens, post_ids).await,
         _ => bail!("Platform {platform} tidak dikenal"),
     }
 }

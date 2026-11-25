@@ -96,6 +96,75 @@ pub async fn extract_thumbnail(ffmpeg_bin: &str, input: &Path, output: &Path, se
     matches!(fallback, Ok(o) if o.status.success() && std::fs::metadata(output).map(|m| m.len() > 0).unwrap_or(false))
 }
 
+pub async fn normalize_custom_thumbnail(
+    ffmpeg_bin: &str,
+    input: &Path,
+    output: &Path,
+) -> Result<()> {
+    let first = Command::new(ffmpeg_bin)
+        .args([
+            "-y",
+            "-i",
+        ])
+        .arg(input)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale='min(1920,iw)':'min(1920,ih)':force_original_aspect_ratio=decrease",
+            "-q:v",
+            "3",
+        ])
+        .arg(output)
+        .output()
+        .await
+        .map_err(|e| anyhow!("Gagal menjalankan ffmpeg ({ffmpeg_bin}): {e}"))?;
+
+    if !first.status.success() {
+        bail!(
+            "File gambar tidak valid atau gagal diproses FFmpeg: {}",
+            String::from_utf8_lossy(&first.stderr)
+                .chars()
+                .take(240)
+                .collect::<String>()
+        );
+    }
+
+    let size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
+    if size == 0 {
+        bail!("Gagal menghasilkan thumbnail JPEG dari file gambar");
+    }
+
+    // Batas ukuran thumbnail YouTube Data API v3 adalah 2 MB.
+    if size > 2 * 1024 * 1024 {
+        let second = Command::new(ffmpeg_bin)
+            .args(["-y", "-i"])
+            .arg(input)
+            .args([
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale='min(1280,iw)':'min(1280,ih)':force_original_aspect_ratio=decrease",
+                "-q:v",
+                "8",
+            ])
+            .arg(output)
+            .output()
+            .await
+            .map_err(|e| anyhow!("Gagal mengompresi thumbnail ({ffmpeg_bin}): {e}"))?;
+
+        if !second.status.success() {
+            bail!("Gagal mengompresi thumbnail agar di bawah 2 MB");
+        }
+        let size2 = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
+        if size2 == 0 || size2 > 2 * 1024 * 1024 {
+            bail!("Ukuran thumbnail masih melebihi batas 2 MB");
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn transcode(
     ffmpeg_bin: &str,
     ffprobe_bin: &str,

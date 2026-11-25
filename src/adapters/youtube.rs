@@ -1,4 +1,4 @@
-use super::{file_stream_body, qs, send_json, PublishInput, PublishResult};
+use super::{file_stream_body, qs, send_json, PostMetrics, PublishInput, PublishResult};
 use crate::db::{ClientCredentials, ConnectedAccount, TokenSet};
 use crate::media::build_caption;
 use crate::security::AppConfig;
@@ -6,6 +6,7 @@ use anyhow::{anyhow, bail, Result};
 use chrono::{Duration, Utc};
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -163,6 +164,11 @@ pub async fn publish(
         .take(4900)
         .collect();
 
+    let privacy_status = input
+        .visibility
+        .as_deref()
+        .unwrap_or(&cfg.youtube_privacy);
+
     let init_res = client
         .post("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status")
         .bearer_auth(&tokens.access_token)
@@ -171,7 +177,7 @@ pub async fn publish(
         .header("X-Upload-Content-Type", "video/mp4")
         .json(&json!({
             "snippet": { "title": title, "description": desc },
-            "status": { "privacyStatus": cfg.youtube_privacy, "selfDeclaredMadeForKids": false }
+            "status": { "privacyStatus": privacy_status, "selfDeclaredMadeForKids": false }
         }))
         .send()
         .await?;
@@ -209,8 +215,76 @@ pub async fn publish(
         .ok_or_else(|| anyhow!("YouTube tidak mengembalikan video id"))?
         .to_string();
 
+    if let Some(ref thumb_path) = input.custom_thumb_path {
+        if let Ok(bytes) = tokio::fs::read(thumb_path).await {
+            let thumb_res = send_json(
+                "YouTube thumbnail",
+                client
+                    .post(format!(
+                        "https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId={}&uploadType=media",
+                        urlencoding::encode(&vid_id)
+                    ))
+                    .bearer_auth(&tokens.access_token)
+                    .header("Content-Type", "image/jpeg")
+                    .header("Content-Length", bytes.len().to_string())
+                    .body(bytes),
+            )
+            .await;
+            if let Err(e) = thumb_res {
+                eprintln!("[youtube] video {vid_id} terbit, tetapi gagal pasang custom thumbnail: {e}");
+            }
+        }
+    }
+
     Ok(PublishResult {
         url: Some(format!("https://www.youtube.com/watch?v={vid_id}")),
         platform_post_id: vid_id,
     })
+}
+
+fn parse_stat_i64(obj: &Value, key: &str) -> Option<i64> {
+    obj.get(key)
+        .and_then(|v| v.as_str().and_then(|s| s.parse::<i64>().ok()).or_else(|| v.as_i64()))
+}
+
+pub async fn fetch_metrics_batch(
+    client: &Client,
+    tokens: &TokenSet,
+    post_ids: &[String],
+) -> Result<HashMap<String, PostMetrics>> {
+    let mut out = HashMap::new();
+    for chunk in post_ids.chunks(50) {
+        let joined = chunk.join(",");
+        let res = send_json(
+            "YouTube video stats",
+            client
+                .get(format!(
+                    "https://www.googleapis.com/youtube/v3/videos?part=statistics&id={}",
+                    urlencoding::encode(&joined)
+                ))
+                .bearer_auth(&tokens.access_token),
+        )
+        .await?;
+
+        if let Some(items) = res.get("items").and_then(|x| x.as_array()) {
+            for item in items {
+                let Some(id) = item.get("id").and_then(|x| x.as_str()) else {
+                    continue;
+                };
+                if let Some(stats) = item.get("statistics") {
+                    out.insert(
+                        id.to_string(),
+                        PostMetrics {
+                            views: parse_stat_i64(stats, "viewCount"),
+                            likes: parse_stat_i64(stats, "likeCount"),
+                            comments: parse_stat_i64(stats, "commentCount"),
+                            shares: None,
+                            note: None,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    Ok(out)
 }

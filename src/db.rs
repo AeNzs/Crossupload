@@ -76,6 +76,7 @@ pub struct VideoView {
     pub name: String,
     pub storage_key: String,
     pub thumb_key: Option<String>,
+    pub thumb_custom: bool,
     pub duration_sec: Option<i64>,
     pub width: Option<i64>,
     pub height: Option<i64>,
@@ -96,12 +97,27 @@ pub struct JobView {
     pub platform: String,
     pub title: Option<String>,
     pub caption: Option<String>,
+    pub visibility: Option<String>,
     pub schedule_at: Option<String>,
     pub created_at: String,
     pub account: Option<String>,
     pub video_id: String,
     pub video: String,
     pub thumb_key: Option<String>,
+    pub views: Option<i64>,
+    pub likes: Option<i64>,
+    pub comments: Option<i64>,
+    pub shares: Option<i64>,
+    pub metrics_updated_at: Option<String>,
+    pub metrics_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishedJobRef {
+    pub job_id: String,
+    pub account_id: String,
+    pub platform: String,
+    pub platform_post_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -136,6 +152,7 @@ pub struct AppStateView {
 pub struct PlatformOverride {
     pub title: Option<String>,
     pub caption: Option<String>,
+    pub visibility: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +162,7 @@ pub struct CreatePostsInput {
     pub account_ids: Vec<String>,
     pub title: Option<String>,
     pub caption: Option<String>,
+    pub visibility: Option<String>,
     pub hashtags: Option<Vec<String>>,
     pub schedule_at: Option<String>,
     pub overrides: Option<HashMap<String, PlatformOverride>>,
@@ -161,7 +179,83 @@ pub struct ClaimedJob {
     pub platform: String,
     pub title: Option<String>,
     pub caption: Option<String>,
+    pub visibility: Option<String>,
     pub hashtags: Vec<String>,
+}
+
+fn has_column(conn: &Connection, table: &str, col: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    for n in names {
+        if n?.eq_ignore_ascii_case(col) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub fn resolve_platform_visibility(
+    platform: &str,
+    raw_override: Option<&str>,
+    raw_global: Option<&str>,
+    cfg: &AppConfig,
+) -> Result<String> {
+    let chosen = raw_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| raw_global.map(str::trim).filter(|s| !s.is_empty()));
+
+    match platform {
+        "youtube" => {
+            let v = match chosen {
+                Some(s) => match s.to_ascii_lowercase().as_str() {
+                    "public" => "public",
+                    "unlisted" => "unlisted",
+                    "private" | "draft" => "private",
+                    other => bail!("Visibilitas YouTube tidak valid: {other}"),
+                },
+                None => cfg.youtube_privacy.as_str(),
+            };
+            Ok(v.to_string())
+        }
+        "tiktok" => {
+            let v = match chosen {
+                Some(s) => match s.to_ascii_uppercase().as_str() {
+                    "PUBLIC" | "PUBLIC_TO_EVERYONE" => "PUBLIC_TO_EVERYONE",
+                    "UNLISTED" | "MUTUAL_FOLLOW_FRIENDS" => "MUTUAL_FOLLOW_FRIENDS",
+                    "FOLLOWER_OF_CREATOR" => "FOLLOWER_OF_CREATOR",
+                    "PRIVATE" | "SELF_ONLY" => "SELF_ONLY",
+                    "DRAFT" => "DRAFT",
+                    other => bail!("Visibilitas TikTok tidak valid: {other}"),
+                },
+                None => cfg.tiktok_privacy.as_str(),
+            };
+            Ok(v.to_string())
+        }
+        "facebook" => {
+            let v = match chosen {
+                Some(s) => match s.to_ascii_uppercase().as_str() {
+                    "PUBLIC" | "UNLISTED" | "PUBLISHED" => "PUBLISHED",
+                    "PRIVATE" | "DRAFT" => "DRAFT",
+                    other => bail!("Visibilitas Facebook tidak valid: {other}"),
+                },
+                None => "PUBLISHED",
+            };
+            Ok(v.to_string())
+        }
+        "instagram" => {
+            let v = match chosen {
+                Some(s) => match s.to_ascii_lowercase().as_str() {
+                    "public" => "public",
+                    "reels_only" | "unlisted" | "private" | "draft" => "reels_only",
+                    other => bail!("Visibilitas Instagram tidak valid: {other}"),
+                },
+                None => "public",
+            };
+            Ok(v.to_string())
+        }
+        _ => Ok(chosen.unwrap_or("public").to_string()),
+    }
 }
 
 fn now_iso() -> String {
@@ -215,6 +309,7 @@ impl Database {
                 user_id TEXT NOT NULL REFERENCES users(id),
                 storage_key TEXT NOT NULL,
                 thumb_key TEXT,
+                thumb_custom INTEGER NOT NULL DEFAULT 0,
                 original_name TEXT NOT NULL,
                 duration_sec INTEGER,
                 width INTEGER,
@@ -232,6 +327,7 @@ impl Database {
                 platform TEXT NOT NULL,
                 title TEXT,
                 caption TEXT,
+                visibility TEXT,
                 hashtags_json TEXT NOT NULL DEFAULT '[]',
                 schedule_at TEXT,
                 created_at TEXT NOT NULL
@@ -248,6 +344,12 @@ impl Database {
                 platform_post_id TEXT,
                 published_url TEXT,
                 published_at TEXT,
+                metric_views INTEGER,
+                metric_likes INTEGER,
+                metric_comments INTEGER,
+                metric_shares INTEGER,
+                metrics_updated_at TEXT,
+                metrics_error TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id);
@@ -263,6 +365,28 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_presets_user ON hashtag_presets(user_id);
             ",
         )?;
+
+        if !has_column(&conn, "videos", "thumb_custom")? {
+            conn.execute(
+                "ALTER TABLE videos ADD COLUMN thumb_custom INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !has_column(&conn, "posts", "visibility")? {
+            conn.execute("ALTER TABLE posts ADD COLUMN visibility TEXT", [])?;
+        }
+        for (col, ty) in [
+            ("metric_views", "INTEGER"),
+            ("metric_likes", "INTEGER"),
+            ("metric_comments", "INTEGER"),
+            ("metric_shares", "INTEGER"),
+            ("metrics_updated_at", "TEXT"),
+            ("metrics_error", "TEXT"),
+        ] {
+            if !has_column(&conn, "jobs", col)? {
+                conn.execute(&format!("ALTER TABLE jobs ADD COLUMN {col} {ty}"), [])?;
+            }
+        }
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -555,8 +679,8 @@ impl Database {
         let created_at = now_iso();
         let g = self.conn.lock().unwrap();
         g.execute(
-            "INSERT INTO videos (id, user_id, storage_key, thumb_key, original_name, duration_sec, width, height, size_bytes, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO videos (id, user_id, storage_key, thumb_key, thumb_custom, original_name, duration_sec, width, height, size_bytes, created_at)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 id,
                 user_id,
@@ -575,12 +699,59 @@ impl Database {
             name: original_name.to_string(),
             storage_key: storage_key.to_string(),
             thumb_key: thumb_key.map(String::from),
+            thumb_custom: false,
             duration_sec: Some(duration_sec),
             width: Some(width),
             height: Some(height),
             size_bytes: Some(size_bytes),
             created_at,
         })
+    }
+
+    pub fn update_video_thumb(
+        &self,
+        user_id: &str,
+        video_id: &str,
+        new_thumb_key: Option<&str>,
+        is_custom: bool,
+    ) -> Result<Option<(VideoView, Option<String>)>> {
+        let mut g = self.conn.lock().unwrap();
+        let tx = g.transaction()?;
+        let prev_key: Option<Option<String>> = tx
+            .query_row(
+                "SELECT thumb_key FROM videos WHERE id = ?1 AND user_id = ?2",
+                params![video_id, user_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        let Some(old_thumb_key) = prev_key else {
+            return Ok(None);
+        };
+        tx.execute(
+            "UPDATE videos SET thumb_key = ?1, thumb_custom = ?2 WHERE id = ?3 AND user_id = ?4",
+            params![new_thumb_key, if is_custom { 1i64 } else { 0i64 }, video_id, user_id],
+        )?;
+        let updated = tx.query_row(
+            "SELECT id, original_name, storage_key, thumb_key, thumb_custom, duration_sec, width, height, size_bytes, created_at
+             FROM videos WHERE id = ?1 AND user_id = ?2",
+            params![video_id, user_id],
+            |r| {
+                Ok(VideoView {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    storage_key: r.get(2)?,
+                    thumb_key: r.get(3)?,
+                    thumb_custom: r.get::<_, i64>(4)? != 0,
+                    duration_sec: r.get(5)?,
+                    width: r.get(6)?,
+                    height: r.get(7)?,
+                    size_bytes: r.get(8)?,
+                    created_at: r.get(9)?,
+                })
+            },
+        )?;
+        tx.commit()?;
+        Ok(Some((updated, old_thumb_key)))
     }
 
     pub fn get_video(&self, user_id: Option<&str>, video_id: &str) -> Result<Option<VideoView>> {
@@ -591,16 +762,17 @@ impl Database {
                 name: r.get(1)?,
                 storage_key: r.get(2)?,
                 thumb_key: r.get(3)?,
-                duration_sec: r.get(4)?,
-                width: r.get(5)?,
-                height: r.get(6)?,
-                size_bytes: r.get(7)?,
-                created_at: r.get(8)?,
+                thumb_custom: r.get::<_, i64>(4)? != 0,
+                duration_sec: r.get(5)?,
+                width: r.get(6)?,
+                height: r.get(7)?,
+                size_bytes: r.get(8)?,
+                created_at: r.get(9)?,
             })
         };
         if let Some(uid) = user_id {
             g.query_row(
-                "SELECT id, original_name, storage_key, thumb_key, duration_sec, width, height, size_bytes, created_at
+                "SELECT id, original_name, storage_key, thumb_key, thumb_custom, duration_sec, width, height, size_bytes, created_at
                  FROM videos WHERE id = ?1 AND user_id = ?2",
                 params![video_id, uid],
                 map_row,
@@ -609,7 +781,7 @@ impl Database {
             .map_err(Into::into)
         } else {
             g.query_row(
-                "SELECT id, original_name, storage_key, thumb_key, duration_sec, width, height, size_bytes, created_at
+                "SELECT id, original_name, storage_key, thumb_key, thumb_custom, duration_sec, width, height, size_bytes, created_at
                  FROM videos WHERE id = ?1",
                 params![video_id],
                 map_row,
@@ -624,7 +796,7 @@ impl Database {
         let tx = g.transaction()?;
         let v: Option<VideoView> = tx
             .query_row(
-                "SELECT id, original_name, storage_key, thumb_key, duration_sec, width, height, size_bytes, created_at
+                "SELECT id, original_name, storage_key, thumb_key, thumb_custom, duration_sec, width, height, size_bytes, created_at
                  FROM videos WHERE id = ?1 AND user_id = ?2",
                 params![video_id, user_id],
                 |r| {
@@ -633,11 +805,12 @@ impl Database {
                         name: r.get(1)?,
                         storage_key: r.get(2)?,
                         thumb_key: r.get(3)?,
-                        duration_sec: r.get(4)?,
-                        width: r.get(5)?,
-                        height: r.get(6)?,
-                        size_bytes: r.get(7)?,
-                        created_at: r.get(8)?,
+                        thumb_custom: r.get::<_, i64>(4)? != 0,
+                        duration_sec: r.get(5)?,
+                        width: r.get(6)?,
+                        height: r.get(7)?,
+                        size_bytes: r.get(8)?,
+                        created_at: r.get(9)?,
                     })
                 },
             )
@@ -768,12 +941,18 @@ impl Database {
                 .filter(|s| !s.is_empty())
                 .or_else(|| input.caption.as_deref().map(str::trim).filter(|s| !s.is_empty()))
                 .map(String::from);
+            let visibility_val = resolve_platform_visibility(
+                &platform,
+                ov.and_then(|o| o.visibility.as_deref()),
+                input.visibility.as_deref(),
+                &self.cfg,
+            )?;
 
             let post_id = new_id();
             let job_id = new_id();
             tx.execute(
-                "INSERT INTO posts (id, user_id, video_id, account_id, platform, title, caption, hashtags_json, schedule_at, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO posts (id, user_id, video_id, account_id, platform, title, caption, visibility, hashtags_json, schedule_at, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     post_id,
                     user_id,
@@ -782,6 +961,7 @@ impl Database {
                     platform,
                     title_val,
                     caption_val,
+                    visibility_val,
                     tags_json,
                     input.schedule_at,
                     now
@@ -856,7 +1036,7 @@ impl Database {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
 
             let mut vid_stmt = g.prepare(
-                "SELECT id, original_name, storage_key, thumb_key, duration_sec, width, height, size_bytes, created_at
+                "SELECT id, original_name, storage_key, thumb_key, thumb_custom, duration_sec, width, height, size_bytes, created_at
                  FROM videos WHERE user_id = ?1 ORDER BY created_at DESC LIMIT 50",
             )?;
             let videos = vid_stmt
@@ -866,19 +1046,22 @@ impl Database {
                         name: r.get(1)?,
                         storage_key: r.get(2)?,
                         thumb_key: r.get(3)?,
-                        duration_sec: r.get(4)?,
-                        width: r.get(5)?,
-                        height: r.get(6)?,
-                        size_bytes: r.get(7)?,
-                        created_at: r.get(8)?,
+                        thumb_custom: r.get::<_, i64>(4)? != 0,
+                        duration_sec: r.get(5)?,
+                        width: r.get(6)?,
+                        height: r.get(7)?,
+                        size_bytes: r.get(8)?,
+                        created_at: r.get(9)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
 
             let mut job_stmt = g.prepare(
                 "SELECT j.id, j.status, j.error, j.attempts, j.platform_post_id, j.published_url, j.published_at,
-                        p.platform, p.title, p.caption, p.schedule_at, j.created_at,
-                        a.display_name, v.id, v.original_name, v.thumb_key
+                        p.platform, p.title, p.caption, p.visibility, p.schedule_at, j.created_at,
+                        a.display_name, v.id, v.original_name, v.thumb_key,
+                        j.metric_views, j.metric_likes, j.metric_comments, j.metric_shares,
+                        j.metrics_updated_at, j.metrics_error
                  FROM jobs j
                  INNER JOIN posts p ON j.post_id = p.id
                  INNER JOIN accounts a ON p.account_id = a.id
@@ -900,12 +1083,19 @@ impl Database {
                         platform: r.get(7)?,
                         title: r.get(8)?,
                         caption: r.get(9)?,
-                        schedule_at: r.get(10)?,
-                        created_at: r.get(11)?,
-                        account: r.get(12)?,
-                        video_id: r.get(13)?,
-                        video: r.get(14)?,
-                        thumb_key: r.get(15)?,
+                        visibility: r.get(10)?,
+                        schedule_at: r.get(11)?,
+                        created_at: r.get(12)?,
+                        account: r.get(13)?,
+                        video_id: r.get(14)?,
+                        video: r.get(15)?,
+                        thumb_key: r.get(16)?,
+                        views: r.get(17)?,
+                        likes: r.get(18)?,
+                        comments: r.get(19)?,
+                        shares: r.get(20)?,
+                        metrics_updated_at: r.get(21)?,
+                        metrics_error: r.get(22)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -942,7 +1132,7 @@ impl Database {
         {
             let mut stmt = tx.prepare(
                 "SELECT j.id, j.user_id, j.post_id, j.attempts, p.video_id, p.account_id, p.platform,
-                        p.title, p.caption, p.hashtags_json, p.schedule_at
+                        p.title, p.caption, p.visibility, p.hashtags_json, p.schedule_at
                  FROM jobs j
                  INNER JOIN posts p ON j.post_id = p.id
                  WHERE j.status = 'queued'
@@ -959,13 +1149,14 @@ impl Database {
                     r.get::<_, String>(6)?,
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, Option<String>>(8)?,
-                    r.get::<_, String>(9)?,
-                    r.get::<_, Option<String>>(10)?,
+                    r.get::<_, Option<String>>(9)?,
+                    r.get::<_, String>(10)?,
+                    r.get::<_, Option<String>>(11)?,
                 ))
             })?;
 
             for row in rows {
-                let (jid, uid, pid, attempts, vid, aid, plat, title, caption, h_json, sched) = row?;
+                let (jid, uid, pid, attempts, vid, aid, plat, title, caption, visibility, h_json, sched) = row?;
                 let due = match sched {
                     None => true,
                     Some(ref s) if s.trim().is_empty() => true,
@@ -985,6 +1176,7 @@ impl Database {
                         platform: plat,
                         title,
                         caption,
+                        visibility,
                         hashtags,
                     });
                     break;
@@ -1047,6 +1239,75 @@ impl Database {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_published_jobs_for_metrics(
+        &self,
+        user_id: &str,
+        job_id: Option<&str>,
+        platform: Option<&str>,
+    ) -> Result<Vec<PublishedJobRef>> {
+        let g = self.conn.lock().unwrap();
+        let mut stmt = g.prepare(
+            "SELECT j.id, p.account_id, p.platform, j.platform_post_id
+             FROM jobs j
+             INNER JOIN posts p ON j.post_id = p.id
+             WHERE j.user_id = ?1
+               AND j.status = 'published'
+               AND j.platform_post_id IS NOT NULL
+               AND TRIM(j.platform_post_id) != ''
+             ORDER BY j.published_at DESC, j.created_at DESC
+             LIMIT 100",
+        )?;
+        let rows = stmt.query_map(params![user_id], |r| {
+            Ok(PublishedJobRef {
+                job_id: r.get(0)?,
+                account_id: r.get(1)?,
+                platform: r.get(2)?,
+                platform_post_id: r.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let item = row?;
+            if let Some(jid) = job_id {
+                if item.job_id != jid {
+                    continue;
+                }
+            }
+            if let Some(pl) = platform {
+                if !pl.is_empty() && pl != "all" && item.platform != pl {
+                    continue;
+                }
+            }
+            out.push(item);
+        }
+        Ok(out)
+    }
+
+    pub fn update_job_metrics(
+        &self,
+        job_id: &str,
+        views: Option<i64>,
+        likes: Option<i64>,
+        comments: Option<i64>,
+        shares: Option<i64>,
+        err: Option<&str>,
+    ) -> Result<()> {
+        let trunc_err = err.map(|s| s.chars().take(400).collect::<String>());
+        let g = self.conn.lock().unwrap();
+        g.execute(
+            "UPDATE jobs
+             SET metric_views = COALESCE(?1, metric_views),
+                 metric_likes = COALESCE(?2, metric_likes),
+                 metric_comments = COALESCE(?3, metric_comments),
+                 metric_shares = COALESCE(?4, metric_shares),
+                 metrics_updated_at = ?5,
+                 metrics_error = ?6
+             WHERE id = ?7",
+            params![views, likes, comments, shares, now_iso(), trunc_err, job_id],
+        )?;
         Ok(())
     }
 }

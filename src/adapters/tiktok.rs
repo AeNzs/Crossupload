@@ -1,11 +1,12 @@
-use super::{file_stream_body, qs, send_json, PublishInput, PublishResult};
+use super::{file_stream_body, qs, send_json, PostMetrics, PublishInput, PublishResult};
 use crate::db::{ClientCredentials, ConnectedAccount, TokenSet};
 use crate::media::build_caption;
-use crate::security::AppConfig;
+use crate::security::{env_opt, AppConfig};
 use anyhow::{anyhow, bail, Result};
 use chrono::{Duration, Utc};
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 const API: &str = "https://open.tiktokapis.com/v2";
 const MB: u64 = 1024 * 1024;
@@ -32,9 +33,18 @@ fn parse_tokens(v: &Value) -> Result<TokenSet> {
 }
 
 pub fn auth_url(creds: &ClientCredentials, state: &str, redirect_uri: &str) -> String {
+    let mut scopes = String::from("user.info.basic,video.publish,video.upload");
+    if let Some(extra) = env_opt("TIKTOK_EXTRA_SCOPES") {
+        for s in extra.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if !scopes.split(',').any(|e| e == s) {
+                scopes.push(',');
+                scopes.push_str(s);
+            }
+        }
+    }
     let q = qs(&[
         ("client_key", &creds.client_id),
-        ("scope", "user.info.basic,video.publish,video.upload"),
+        ("scope", scopes.as_str()),
         ("response_type", "code"),
         ("redirect_uri", redirect_uri),
         ("state", state),
@@ -146,28 +156,47 @@ pub async fn publish(
         input.title.clone().unwrap_or_default()
     };
 
-    let init = send_json(
-        "TikTok publish init",
-        client
-            .post(format!("{API}/post/publish/video/init/"))
-            .bearer_auth(&tokens.access_token)
-            .json(&json!({
-                "post_info": {
-                    "title": title_str,
-                    "privacy_level": cfg.tiktok_privacy,
-                    "disable_duet": false,
-                    "disable_comment": false,
-                    "disable_stitch": false
-                },
-                "source_info": {
-                    "source": "FILE_UPLOAD",
-                    "video_size": size,
-                    "chunk_size": chunk_size,
-                    "total_chunk_count": total_chunks
-                }
-            })),
-    )
-    .await?;
+    let privacy = input
+        .visibility
+        .as_deref()
+        .unwrap_or(&cfg.tiktok_privacy);
+    let is_draft = privacy.eq_ignore_ascii_case("DRAFT");
+
+    let source_info = json!({
+        "source": "FILE_UPLOAD",
+        "video_size": size,
+        "chunk_size": chunk_size,
+        "total_chunk_count": total_chunks
+    });
+
+    let init = if is_draft {
+        send_json(
+            "TikTok inbox init",
+            client
+                .post(format!("{API}/post/publish/inbox/video/init/"))
+                .bearer_auth(&tokens.access_token)
+                .json(&json!({ "source_info": source_info })),
+        )
+        .await?
+    } else {
+        send_json(
+            "TikTok publish init",
+            client
+                .post(format!("{API}/post/publish/video/init/"))
+                .bearer_auth(&tokens.access_token)
+                .json(&json!({
+                    "post_info": {
+                        "title": title_str,
+                        "privacy_level": privacy,
+                        "disable_duet": false,
+                        "disable_comment": false,
+                        "disable_stitch": false
+                    },
+                    "source_info": source_info
+                })),
+        )
+        .await?
+    };
 
     if let Some(code) = init
         .get("error")
@@ -228,7 +257,7 @@ pub async fn publish(
             .and_then(|d| d.get("status"))
             .and_then(|x| x.as_str())
             .unwrap_or("");
-        if st == "PUBLISH_COMPLETE" {
+        if st == "PUBLISH_COMPLETE" || st == "SEND_TO_USER_INBOX" {
             let post_id = s
                 .get("data")
                 .and_then(|d| d.get("publicaly_available_post_id"))
@@ -255,4 +284,77 @@ pub async fn publish(
         platform_post_id: publish_id,
         url: None,
     })
+}
+
+pub async fn fetch_metrics_batch(
+    client: &Client,
+    tokens: &TokenSet,
+    post_ids: &[String],
+) -> Result<HashMap<String, PostMetrics>> {
+    let mut out = HashMap::new();
+    for chunk in post_ids.chunks(20) {
+        let res = send_json(
+            "TikTok video query",
+            client
+                .post(format!(
+                    "{API}/video/query/?fields=id,view_count,like_count,comment_count,share_count"
+                ))
+                .bearer_auth(&tokens.access_token)
+                .json(&json!({
+                    "filters": { "video_ids": chunk }
+                })),
+        )
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("scope_not_authorized") || msg.contains("-> 401:") || msg.contains("-> 403:") {
+                anyhow!(
+                    "TikTok memerlukan Display API scope video.list. Aktifkan Display API di TikTok Developer Portal, isi TIKTOK_EXTRA_SCOPES=video.list di .env, lalu hubungkan ulang akun TikTok."
+                )
+            } else {
+                e
+            }
+        })?;
+
+        if let Some(code) = res
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_str())
+        {
+            if code != "ok" {
+                if code == "scope_not_authorized" {
+                    bail!("TikTok memerlukan Display API scope video.list. Aktifkan Display API di TikTok Developer Portal, isi TIKTOK_EXTRA_SCOPES=video.list di .env, lalu hubungkan ulang akun TikTok.");
+                }
+                let msg = res
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or(code);
+                bail!("TikTok query error: {msg}");
+            }
+        }
+
+        if let Some(videos) = res
+            .get("data")
+            .and_then(|d| d.get("videos"))
+            .and_then(|v| v.as_array())
+        {
+            for v in videos {
+                let Some(id) = v.get("id").and_then(|x| x.as_str()) else {
+                    continue;
+                };
+                out.insert(
+                    id.to_string(),
+                    PostMetrics {
+                        views: v.get("view_count").and_then(|x| x.as_i64()),
+                        likes: v.get("like_count").and_then(|x| x.as_i64()),
+                        comments: v.get("comment_count").and_then(|x| x.as_i64()),
+                        shares: v.get("share_count").and_then(|x| x.as_i64()),
+                        note: None,
+                    },
+                );
+            }
+        }
+    }
+    Ok(out)
 }

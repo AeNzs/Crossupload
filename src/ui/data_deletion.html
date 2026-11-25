@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Data Deletion Instructions: CrossUpload</title>
+  <link rel="stylesheet" href="/assets/app.css" />
+</head>
+<body style="padding-bottom:0;">
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <a href="/" class="brand">
+        <span class="brand-cue" aria-hidden="true"></span>
+        <span class="brand-title">CrossUpload</span>
+      </a>
+      <nav class="actions" aria-label="Legal navigation">
+        <a href="/terms" class="nav-link">Terms</a>
+        <a href="/privacy" class="nav-link">Privacy</a>
+        <a href="/data-deletion" class="nav-link" aria-current="page">Data Deletion</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container" style="max-width:780px; padding-top:28px; padding-bottom:56px;">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">User Data Deletion Instructions</h1>
+        <p class="page-sub">How to remove your connected accounts, OAuth tokens, and uploaded media from CrossUpload.</p>
+      </div>
+    </div>
+
+    <div class="stack" style="margin-top:24px; gap:20px;">
+      <section>
+        <h2 class="stage-heading">1. Remove Accounts Inside CrossUpload</h2>
+        <p style="margin-top:8px;">
+          Sign in to CrossUpload at <code>{{APP_URL}}</code>, open the <strong>Kredensial</strong> panel using the key icon in the top-right header, select the provider (YouTube, TikTok, or Meta), and click <strong>Putuskan</strong> on any connected account. This permanently deletes the encrypted OAuth tokens and associated job records from the database.
+        </p>
+      </section>
+
+      <section>
+        <h2 class="stage-heading">2. Delete Uploaded Videos</h2>
+        <p style="margin-top:8px;">
+          Open the Upload page and click <strong>Hapus</strong> next to any item in the video library to remove both the original video file and its generated thumbnail from disk.
+        </p>
+      </section>
+
+      <section>
+        <h2 class="stage-heading">3. Revoke Access at the Platform Level</h2>
+        <p style="margin-top:8px;">
+          You can also revoke CrossUpload's permissions directly in your TikTok Security settings, Google Account Third-Party Connections, or Facebook Business Integrations settings. For manual deletion assistance, email <code>{{CONTACT_EMAIL}}</code>.
+        </p>
+      </section>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container" style="display:flex; flex-wrap:wrap; justify-content:space-between; gap:12px;">
+      <span>CrossUpload</span>
+      <div style="display:flex; gap:16px;">
+        <a href="/terms">Terms of Service</a>
+        <a href="/privacy">Privacy Policy</a>
+        <a href="/data-deletion">Data Deletion</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

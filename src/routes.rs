@@ -1,6 +1,6 @@
 use crate::adapters;
 use crate::db::{CreatePostsInput, Database, PROVIDERS};
-use crate::media::{extract_thumbnail, probe};
+use crate::media::{extract_thumbnail, normalize_custom_thumbnail, probe};
 use crate::security::safe_equal;
 use crate::worker;
 use axum::{
@@ -25,6 +25,10 @@ use uuid::Uuid;
 
 const LOGIN_HTML: &str = include_str!("ui/login.html");
 const INDEX_HTML: &str = include_str!("ui/index.html");
+const TERMS_HTML: &str = include_str!("ui/terms.html");
+const PRIVACY_HTML: &str = include_str!("ui/privacy.html");
+const DATA_DELETION_HTML: &str = include_str!("ui/data_deletion.html");
+const TIKTOK_VERIFY_BUNDLED: &str = include_str!("../tiktokdne5JcFUrem4EAHYhxvif6ySXXRCZdMZ.txt");
 const APP_CSS: &str = include_str!("ui/app.css");
 const APP_JS: &str = include_str!("ui/app.js");
 
@@ -41,8 +45,15 @@ pub fn build_router(ctx: AppContext) -> Router {
     Router::new()
         .route("/", get(page_app))
         .route("/queue", get(page_app))
+        .route("/analytics", get(page_app))
         .route("/credentials", get(page_app))
         .route("/login", get(page_login))
+        .route("/terms", get(page_terms))
+        .route("/tos", get(page_terms))
+        .route("/terms-of-service", get(page_terms))
+        .route("/privacy", get(page_privacy))
+        .route("/privacy-policy", get(page_privacy))
+        .route("/data-deletion", get(page_data_deletion))
         .route("/assets/app.css", get(asset_css))
         .route("/assets/app.js", get(asset_js))
         .route("/api/auth/login", post(api_login))
@@ -53,18 +64,32 @@ pub fn build_router(ctx: AppContext) -> Router {
         .route("/api/credentials/:provider/test", post(api_test_credential))
         .route("/api/connect/:provider", get(api_connect_provider))
         .route("/api/oauth/:provider/callback", get(api_oauth_callback))
+        .route("/api/oauth/tiktok/:filename", get(serve_tiktok_verify))
         .route("/api/accounts/:id", delete(api_delete_account))
         .route(
             "/api/videos",
             post(api_upload_video).layer(DefaultBodyLimit::disable()),
         )
+        .route(
+            "/tiktokdne5JcFUrem4EAHYhxvif6ySXXRCZdMZ.txt",
+            get(serve_bundled_tiktok_verify),
+        )
         .route("/api/videos/:id", delete(api_delete_video))
-        .route("/api/videos/:id/thumb", get(api_video_thumb))
+        .route(
+            "/api/videos/:id/thumb",
+            get(api_video_thumb)
+                .post(api_upload_video_thumb)
+                .delete(api_reset_video_thumb)
+                .layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
+        )
+        .route("/api/public/thumbs/:token", get(api_public_thumb))
         .route("/api/videos/:id/stream", get(api_video_stream))
         .route("/api/posts", post(api_create_posts))
         .route("/api/jobs/:id", post(api_job_action))
+        .route("/api/analytics/refresh", post(api_refresh_analytics))
         .route("/api/presets", post(api_save_preset))
         .route("/api/presets/:id", delete(api_delete_preset))
+        .route("/:filename", get(serve_tiktok_verify))
         .with_state(ctx)
 }
 
@@ -100,6 +125,78 @@ async fn page_app(State(ctx): State<AppContext>, headers: HeaderMap) -> Response
         return Redirect::to("/login").into_response();
     }
     Html(INDEX_HTML).into_response()
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn render_legal(ctx: &AppContext, tpl: &str) -> Response {
+    let html = tpl
+        .replace("{{APP_URL}}", &escape_html(&ctx.db.cfg.app_url))
+        .replace("{{CONTACT_EMAIL}}", &escape_html(&ctx.db.cfg.contact_email));
+    Html(html).into_response()
+}
+
+async fn page_terms(State(ctx): State<AppContext>) -> Response {
+    render_legal(&ctx, TERMS_HTML)
+}
+
+async fn page_privacy(State(ctx): State<AppContext>) -> Response {
+    render_legal(&ctx, PRIVACY_HTML)
+}
+
+async fn page_data_deletion(State(ctx): State<AppContext>) -> Response {
+    render_legal(&ctx, DATA_DELETION_HTML)
+}
+
+async fn serve_bundled_tiktok_verify() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        TIKTOK_VERIFY_BUNDLED,
+    )
+        .into_response()
+}
+
+async fn serve_tiktok_verify(
+    State(ctx): State<AppContext>,
+    Path(filename): Path<String>,
+) -> Response {
+    let safe_name = filename.starts_with("tiktok")
+        && filename.ends_with(".txt")
+        && filename.len() <= 128
+        && filename
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-');
+    if !safe_name {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    if filename == "tiktokdne5JcFUrem4EAHYhxvif6ySXXRCZdMZ.txt" {
+        return serve_bundled_tiktok_verify().await;
+    }
+
+    let in_public = ctx.db.cfg.data_dir.join("public").join(&filename);
+    if let Ok(content) = tokio::fs::read_to_string(&in_public).await {
+        return ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], content).into_response();
+    }
+
+    if let Ok(content) = tokio::fs::read_to_string(StdPath::new(&filename)).await {
+        return ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], content).into_response();
+    }
+
+    if let Some(ref content) = ctx.db.cfg.tiktok_site_verification {
+        return (
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            content.clone(),
+        )
+            .into_response();
+    }
+
+    StatusCode::NOT_FOUND.into_response()
 }
 
 async fn asset_css() -> Response {
@@ -478,7 +575,160 @@ async fn api_video_thumb(
         Ok(bytes) => (
             [
                 (header::CONTENT_TYPE, "image/jpeg"),
-                (header::CACHE_CONTROL, "private, max-age=86400"),
+                (header::CACHE_CONTROL, "private, no-cache"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn api_upload_video_thumb(
+    State(ctx): State<AppContext>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let headers = req.headers().clone();
+    let Some(uid) = current_user_id(&ctx, &headers) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let Ok(Some(_video)) = ctx.db.get_video(Some(&uid), &id) else {
+        return json_err(StatusCode::NOT_FOUND, "Video tidak ditemukan");
+    };
+
+    let raw_name = headers
+        .get("x-filename")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("thumb.jpg");
+    let decoded_name = urlencoding::decode(raw_name)
+        .map(|c| c.into_owned())
+        .unwrap_or_else(|_| "thumb.jpg".to_string());
+    let ext = StdPath::new(&decoded_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e.to_lowercase()))
+        .unwrap_or_else(|| ".jpg".to_string());
+
+    const ALLOWED_IMG: [&str; 4] = [".jpg", ".jpeg", ".png", ".webp"];
+    if !ALLOWED_IMG.contains(&ext.as_str()) {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            format!("Format gambar {} tidak didukung. Gunakan JPG, PNG, atau WEBP.", ext),
+        );
+    }
+
+    let tmp_in = ctx
+        .db
+        .cfg
+        .data_dir
+        .join("tmp")
+        .join(format!("thumb_in_{}{}", Uuid::new_v4(), ext));
+
+    let mut out_file = match File::create(&tmp_in).await {
+        Ok(f) => f,
+        Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let stream = req
+        .into_body()
+        .into_data_stream()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+    let mut reader = StreamReader::new(stream);
+    if let Err(e) = tokio::io::copy(&mut reader, &mut out_file).await {
+        let _ = std::fs::remove_file(&tmp_in);
+        return json_err(StatusCode::BAD_REQUEST, format!("Gagal membaca file thumbnail: {e}"));
+    }
+    drop(out_file);
+
+    let new_thumb_key = format!("{}_custom.jpg", Uuid::new_v4());
+    let new_thumb_path = ctx.db.cfg.data_dir.join("thumbs").join(&new_thumb_key);
+    let norm_res =
+        normalize_custom_thumbnail(&ctx.db.cfg.ffmpeg_bin, &tmp_in, &new_thumb_path).await;
+    let _ = std::fs::remove_file(&tmp_in);
+
+    if let Err(e) = norm_res {
+        let _ = std::fs::remove_file(&new_thumb_path);
+        return json_err(StatusCode::BAD_REQUEST, e.to_string());
+    }
+
+    match ctx
+        .db
+        .update_video_thumb(&uid, &id, Some(&new_thumb_key), true)
+    {
+        Ok(Some((updated, old_key))) => {
+            if let Some(old) = old_key {
+                if old != new_thumb_key {
+                    let _ = std::fs::remove_file(ctx.db.cfg.data_dir.join("thumbs").join(old));
+                }
+            }
+            Json(updated).into_response()
+        }
+        Ok(None) => {
+            let _ = std::fs::remove_file(&new_thumb_path);
+            json_err(StatusCode::NOT_FOUND, "Video tidak ditemukan")
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&new_thumb_path);
+            json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
+    }
+}
+
+async fn api_reset_video_thumb(
+    State(ctx): State<AppContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(uid) = current_user_id(&ctx, &headers) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let Ok(Some(video)) = ctx.db.get_video(Some(&uid), &id) else {
+        return json_err(StatusCode::NOT_FOUND, "Video tidak ditemukan");
+    };
+
+    let src_path = ctx.db.cfg.data_dir.join("uploads").join(&video.storage_key);
+    let new_thumb_key = format!("{}_auto.jpg", Uuid::new_v4());
+    let new_thumb_path = ctx.db.cfg.data_dir.join("thumbs").join(&new_thumb_key);
+    let seek = video
+        .duration_sec
+        .map(|d| ((d as f64) / 3.0).min(1.0))
+        .unwrap_or(0.5);
+    let ok = src_path.exists()
+        && extract_thumbnail(&ctx.db.cfg.ffmpeg_bin, &src_path, &new_thumb_path, seek).await;
+
+    match ctx.db.update_video_thumb(
+        &uid,
+        &id,
+        if ok { Some(&new_thumb_key) } else { None },
+        false,
+    ) {
+        Ok(Some((updated, old_key))) => {
+            if let Some(old) = old_key {
+                if old != new_thumb_key {
+                    let _ = std::fs::remove_file(ctx.db.cfg.data_dir.join("thumbs").join(old));
+                }
+            }
+            Json(updated).into_response()
+        }
+        Ok(None) => json_err(StatusCode::NOT_FOUND, "Video tidak ditemukan"),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn api_public_thumb(
+    State(ctx): State<AppContext>,
+    Path(token): Path<String>,
+) -> Response {
+    let Some(thumb_key) = ctx.db.cfg.verify_thumb_token(&token) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let thumb_path = ctx.db.cfg.data_dir.join("thumbs").join(&thumb_key);
+    match tokio::fs::read(&thumb_path).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "image/jpeg"),
+                (header::CACHE_CONTROL, "public, max-age=3600"),
             ],
             bytes,
         )
@@ -605,6 +855,33 @@ async fn api_job_action(
         Ok(false) => json_err(StatusCode::CONFLICT, "Job tidak dapat diubah pada status ini"),
         Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RefreshAnalyticsReq {
+    job_id: Option<String>,
+    platform: Option<String>,
+}
+
+async fn api_refresh_analytics(
+    State(ctx): State<AppContext>,
+    headers: HeaderMap,
+    body: Option<Json<RefreshAnalyticsReq>>,
+) -> Response {
+    let Some(uid) = current_user_id(&ctx, &headers) else {
+        return json_err(StatusCode::UNAUTHORIZED, "unauthorized");
+    };
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let res = worker::refresh_published_metrics(
+        &ctx.db,
+        &ctx.http,
+        &uid,
+        req.job_id.as_deref(),
+        req.platform.as_deref(),
+    )
+    .await;
+    Json(res).into_response()
 }
 
 #[derive(Deserialize)]

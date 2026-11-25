@@ -25,6 +25,8 @@ pub struct AppConfig {
     pub ffprobe_bin: String,
     pub youtube_privacy: String,
     pub tiktok_privacy: String,
+    pub contact_email: String,
+    pub tiktok_site_verification: Option<String>,
 }
 
 pub fn env_opt(name: &str) -> Option<String> {
@@ -75,10 +77,14 @@ impl AppConfig {
         std::fs::create_dir_all(data_dir.join("uploads"))?;
         std::fs::create_dir_all(data_dir.join("thumbs"))?;
         std::fs::create_dir_all(data_dir.join("tmp"))?;
+        std::fs::create_dir_all(data_dir.join("public"))?;
 
         let db_path = env_opt("DATABASE_URL")
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("crossupload.db"));
+
+        let contact_email = env_opt("CONTACT_EMAIL").unwrap_or_else(|| allowed_email.clone());
+        let tiktok_site_verification = env_opt("TIKTOK_SITE_VERIFICATION");
 
         Ok(Self {
             app_url,
@@ -93,6 +99,8 @@ impl AppConfig {
             ffprobe_bin: env_opt("FFPROBE_PATH").unwrap_or_else(|| "ffprobe".to_string()),
             youtube_privacy: env_opt("YOUTUBE_PRIVACY").unwrap_or_else(|| "private".to_string()),
             tiktok_privacy: env_opt("TIKTOK_PRIVACY").unwrap_or_else(|| "SELF_ONLY".to_string()),
+            contact_email,
+            tiktok_site_verification,
         })
     }
 
@@ -186,6 +194,43 @@ impl AppConfig {
             return false;
         };
         !n.is_empty() && safe_equal(&self.sign(n), sig)
+    }
+
+    pub fn create_thumb_token(&self, thumb_key: &str) -> String {
+        let exp_ms = chrono::Utc::now().timestamp_millis() + 2 * 3600 * 1000;
+        let key_hex = hex::encode(thumb_key.as_bytes());
+        let body = format!("thumb.{key_hex}.{exp_ms}");
+        let sig = self.sign(&body);
+        format!("{key_hex}.{exp_ms}.{sig}")
+    }
+
+    pub fn verify_thumb_token(&self, token: &str) -> Option<String> {
+        let parts: Vec<&str> = token.split('.').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let key_hex = parts[0];
+        let exp_str = parts[1];
+        let sig = parts[2];
+        let body = format!("thumb.{key_hex}.{exp_str}");
+        if !safe_equal(&self.sign(&body), sig) {
+            return None;
+        }
+        let exp_ms = exp_str.parse::<i64>().ok()?;
+        if exp_ms < chrono::Utc::now().timestamp_millis() {
+            return None;
+        }
+        let bytes = hex::decode(key_hex).ok()?;
+        let key = String::from_utf8(bytes).ok()?;
+        let safe = !key.is_empty()
+            && key.len() <= 128
+            && key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-');
+        if !safe || key.contains("..") {
+            return None;
+        }
+        Some(key)
     }
 }
 
