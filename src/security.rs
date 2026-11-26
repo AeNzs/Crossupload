@@ -15,6 +15,7 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct AppConfig {
     pub app_url: String,
     pub port: u16,
+    pub bind_addr: String,
     pub allowed_email: String,
     pub app_password: String,
     pub auth_secret: String,
@@ -54,6 +55,12 @@ impl AppConfig {
             })
             .unwrap_or(3100);
 
+        // Default 127.0.0.1: panel hanya bisa dijangkau dari mesin sendiri.
+        // Isi BIND_ADDR=0.0.0.0 hanya bila sengaja diekspos (mis. di belakang
+        // reverse proxy + firewall di VPS).
+        let bind_addr =
+            env_opt("BIND_ADDR").unwrap_or_else(|| "127.0.0.1".to_string());
+
         let allowed_email = env_opt("ALLOWED_EMAIL").unwrap_or_else(|| "owner@local".to_string());
         let app_password = env_opt("APP_PASSWORD")
             .ok_or_else(|| anyhow!("APP_PASSWORD belum diisi di file .env"))?;
@@ -89,6 +96,7 @@ impl AppConfig {
         Ok(Self {
             app_url,
             port,
+            bind_addr,
             allowed_email,
             app_password,
             auth_secret,
