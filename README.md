@@ -189,6 +189,7 @@ Anda tidak perlu menulis kredensial API ke `.env`. Setelah masuk ke studio web:
 |---|---|---|---|
 | `APP_URL` | Tidak | `http://localhost:3100` | URL dasar aplikasi untuk membentuk Redirect URI OAuth dan port bawaan. |
 | `PORT` | Tidak | Dari `APP_URL` / `3100` | Port HTTP tempat server menerima koneksi. |
+| `BIND_ADDR` | Tidak | `127.0.0.1` | Alamat bind server (`127.0.0.1` = hanya mesin sendiri; `0.0.0.0` hanya di belakang reverse proxy + firewall). |
 | `ALLOWED_EMAIL` | Tidak | `owner@local` | Email login yang diizinkan masuk ke studio. |
 | `APP_PASSWORD` | Ya | (kosong) | Password login ke dashboard web. |
 | `AUTH_SECRET` | Ya | (kosong) | Kunci rahasia HMAC-SHA256 untuk menandatangani cookie sesi dan state OAuth. |

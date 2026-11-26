@@ -5,7 +5,7 @@ use anyhow::{anyhow, bail, Result};
 use reqwest::Client;
 use std::collections::HashMap;
 
-const V: &str = "v21.0";
+const V: &str = "v27.0";
 
 fn graph(path: &str) -> String {
     format!("https://graph.facebook.com/{V}/{path}")
@@ -19,7 +19,7 @@ pub fn auth_url(creds: &ClientCredentials, state: &str, redirect_uri: &str) -> S
         ("auth_type", "rerequest"),
         (
             "scope",
-            "pages_show_list,pages_read_engagement,pages_manage_posts,instagram_basic,instagram_content_publish,business_management",
+            "pages_show_list,pages_read_engagement,pages_manage_posts,instagram_basic,instagram_content_publish,instagram_manage_insights,business_management",
         ),
     ]);
     format!("https://www.facebook.com/{V}/dialog/oauth?{q}")

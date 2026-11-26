@@ -9,13 +9,17 @@ use anyhow::Result;
 use db::Database;
 use routes::{build_router, AppContext};
 use security::AppConfig;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cfg = AppConfig::from_env()?;
     let port = cfg.port;
     let app_url = cfg.app_url.clone();
+    let bind_ip: IpAddr = cfg
+        .bind_addr
+        .parse()
+        .unwrap_or(IpAddr::from([127, 0, 0, 1]));
 
     let db = Database::open(cfg)?;
     let http = adapters::build_http_client()?;
@@ -23,10 +27,10 @@ async fn main() -> Result<()> {
     worker::spawn_worker(db.clone(), http.clone());
 
     let router = build_router(AppContext { db, http });
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let addr = SocketAddr::new(bind_ip, port);
     println!("====================================================");
     println!(" CrossUpload (Rust Single-Binary) siap dijalankan!");
-    println!(" Web Studio : {app_url} (listening on 0.0.0.0:{port})");
+    println!(" Web Studio : {app_url} (listening on {bind_ip}:{port})");
     println!("====================================================");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
